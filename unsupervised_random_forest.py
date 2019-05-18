@@ -2,7 +2,7 @@
 from sklearn.ensemble import RandomForestClassifier
 import numpy
 from joblib import Parallel, delayed
-from numba import jit
+from numba import njit
 
 
 
@@ -87,20 +87,20 @@ def is_good_matrix_get(forest, X):
 
     return is_good_matrix
 
-@jit
-def get_anomaly_score_slow(leafs, is_good, fe):
+@njit
+def get_anomaly_score_slow(distance_to_objects,leafs, is_good, fe):
 
     start = fe[0]
     end = fe[1]
 
     obs_num = leafs.shape[0]
     tree_num = leafs.shape[1]
-    anomaly_score = numpy.ones(end-start,dtype = numpy.dtype('f4'))
-    dists = numpy.ones(obs_num,dtype = numpy.dtype('f4'))
+    anomaly_score = numpy.zeros(end-start)
+    dists = numpy.zeros(distance_to_objects.shape)
 
 
     for i in range(start,end):
-        for j in range(obs_num):
+        for j_idx, j in enumerate(distance_to_objects):
             same_leaf = 0
             good_trees = 0
             for k in range(tree_num):
@@ -113,12 +113,12 @@ def get_anomaly_score_slow(leafs, is_good, fe):
             else:
                 dis = 1 - float(same_leaf) / good_trees
 
-            dists[j] = dis
-        anomaly_score[i] = numpy.sum(dists)
+            dists[j_idx] = dis
+        anomaly_score[i-start] = numpy.sum(dists)
 
     return anomaly_score
 
-@jit
+@njit
 def build_distance_matrix_slow(leafs, is_good, fe):
 
     start = fe[0]
@@ -126,7 +126,7 @@ def build_distance_matrix_slow(leafs, is_good, fe):
 
     obs_num = leafs.shape[0]
     tree_num = leafs.shape[1]
-    dis_mat = numpy.ones((end - start,obs_num),dtype = numpy.dtype('f4'))
+    dis_mat = numpy.ones((end - start,obs_num))
 
     for i in range(start,end):
         jstart = i
@@ -147,7 +147,7 @@ def build_distance_matrix_slow(leafs, is_good, fe):
 
     return dis_mat
 
-@jit
+@njit
 def distance_mat_fill(dis_mat):
 
 
@@ -166,6 +166,7 @@ class urf(object):
         self.synthetic_data_type = synthetic_data_type
         self.max_features = max_features
         self.max_depth = max_depth
+        
 
         return
 
@@ -226,12 +227,22 @@ class urf(object):
         return distance_matrix
 
 
-    def get_anomaly_score(self,X):
+    def get_anomaly_score(self,X,mean_over=2500):
         self.get_Xs(X)
         rf_leafs, is_good = self.get_leafs()
-
+        
+        nof_objects = X.shape[0]
+    
+        
+        if  mean_over < nof_objects:
+            distance_to_objects = numpy.random.choice(nof_objects,mean_over,replace=False)
+            
+        else:
+            distance_to_objects = numpy.arange(nof_objects)
+            
         anomaly_score = Parallel(n_jobs=-1)(delayed(get_anomaly_score_slow)
-                                              (rf_leafs, is_good, se)          for se in self.fe)
+                                              (distance_to_objects, rf_leafs, is_good, se)          for se in self.fe)
+
         anomaly_score = numpy.concatenate(anomaly_score)
 
 
