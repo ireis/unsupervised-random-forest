@@ -3,71 +3,98 @@ from sklearn.ensemble import RandomForestClassifier
 import numpy
 from joblib import Parallel, delayed
 from numba import njit
+import synthetic_data
 
 
 
+class urf(object):
+    def __init__(self, n_trees = 100, synthetic_data_type = None, max_features='auto', max_depth=None):
 
-def create_synthetic_data(X,synthetic_data_type):
-    """
-    Creates synthetic data for RR dissimilarity
-    :param X:
-    :param kwargs:
-    :return:
-    """
-    nof_objects = X.shape[0]
-    if synthetic_data_type is None:
-        synthetic_data_type = 'default'
-    if synthetic_data_type == 'default':
-        synthetic_X = default_synthetic_data(X)
-        X_total = numpy.concatenate([X,
-                                 synthetic_X])
+        self.n_trees = n_trees
+        self.synthetic_data_type = synthetic_data_type
+        self.max_features = max_features
+        self.max_depth = max_depth
 
 
-    elif synthetic_data_type == 'f':
-        synthetic_X = f_synthetic_data(X)
-        X_total = numpy.concatenate([numpy.hstack(X),
-                                 synthetic_X])
-    else:
-        print('Bad synthetic data type')
-        return -1
+        return
 
-    Y_total = numpy.concatenate([numpy.zeros(nof_objects),
-                                 numpy.ones(nof_objects)])
-    return X_total, Y_total
 
-def f_synthetic_data(X_list):
-    """
-    Synthetic data with same marginal distribution for each feature
-    """
+    def get_random_forest(self):
+        """
+        Runs random forest on X
+        """
+        X_total, Y_total = synthetic_data.create_synthetic_data(self.X, self.synthetic_data_type)
 
-    X = numpy.hstack(X_list)
-    synthetic_X = numpy.zeros(X.shape)
 
-    nof_chunks = len(X_list)
-    nof_objects = X.shape[0]
+        rf = RandomForestClassifier(n_jobs=-1, n_estimators=self.n_trees, max_features = self.max_features,  max_depth = self.max_depth)
+        rf.fit(X_total, Y_total)
 
-    chunks_inds = numpy.random.choice(numpy.arange(nof_objects), [nof_objects, nof_chunks])
+        return rf
 
-    for i in range(nof_objects):
-        x = [X_list[c][chunks_inds[i,c]] for c in range(nof_chunks)]
+    def get_leafs(self):
 
-        synthetic_X[i] = numpy.hstack(x)
+        rf = self.get_random_forest()
+        rf_leafs = rf.apply(self.X)
 
-    return synthetic_X
+        is_good = is_good_matrix_get(rf, self.X)
+        return rf_leafs, is_good
 
-def default_synthetic_data(X):
-    """
-    Synthetic data with same marginal distribution for each feature
-    """
-    synthetic_X = numpy.zeros(X.shape)
+    def get_Xs(self,X ):
+        try:
+            objnum = X.shape[0]
+            Xs = X
+        except:
 
-    nof_features = X.shape[1]
-    nof_objects = X.shape[0]
+            Xs = X.copy()
+            X = numpy.hstack(Xs)
+            objnum = X.shape[0]
 
-    for f in range(nof_features):
-        feature_values = X[:, f]
-        synthetic_X[:, f] += numpy.random.choice(feature_values, nof_objects)
-    return synthetic_X
+        csize = 10
+        start = numpy.arange(1 + int(objnum / csize)) * csize
+        end = start + csize
+        fe = numpy.vstack([start, end]).T
+        fe[-1][1] = objnum
+
+        self.fe = fe
+        self.Xs = Xs
+        self.X = X
+
+        return
+
+
+    def get_distance(self,X):
+        self.get_Xs(X)
+        rf_leafs, is_good = self.get_leafs()
+        distance_matrix = Parallel(n_jobs=-1)(delayed(build_distance_matrix_slow)
+                                              (rf_leafs, is_good, se)          for se in self.fe)
+        distance_matrix = numpy.vstack(distance_matrix)
+        distance_matrix = distance_mat_fill(distance_matrix)
+
+        return distance_matrix
+
+
+    def get_anomaly_score(self,X,mean_over=2500, knn=None):
+        self.get_Xs(X)
+        rf_leafs, is_good = self.get_leafs()
+
+        nof_objects = X.shape[0]
+
+        if not knn is None:
+            mean_over = nof_objects
+            knn = int(knn)
+
+        if  mean_over < nof_objects:
+            distance_to_objects = numpy.random.choice(nof_objects,mean_over,replace=False)
+        else:
+            distance_to_objects = numpy.arange(nof_objects)
+
+        anomaly_score = Parallel(n_jobs=-1)(delayed(get_anomaly_score_slow)
+                                              (knn, distance_to_objects, rf_leafs, is_good, se)          for se in self.fe)
+
+        anomaly_score = numpy.concatenate(anomaly_score)
+
+
+        return anomaly_score
 
 
 
@@ -161,95 +188,3 @@ def distance_mat_fill(dis_mat):
             dis_mat[i][j] = dis_mat[j][i]
 
     return dis_mat
-
-class urf(object):
-    def __init__(self, n_trees = 100, synthetic_data_type = None, max_features='auto', max_depth=None):
-
-        self.n_trees = n_trees
-        self.synthetic_data_type = synthetic_data_type
-        self.max_features = max_features
-        self.max_depth = max_depth
-        
-
-        return
-
-
-    def get_random_forest(self):
-        """
-        Runs random forest on X
-        """
-        X_total, Y_total = create_synthetic_data(self.X, self.synthetic_data_type)
-
-
-        rf = RandomForestClassifier(n_jobs=-1, n_estimators=self.n_trees, max_features = self.max_features,  max_depth = self.max_depth)
-        rf.fit(X_total, Y_total)
-
-        return rf
-
-    def get_leafs(self):
-
-        rf = self.get_random_forest()
-        rf_leafs = rf.apply(self.X)
-
-        is_good = is_good_matrix_get(rf, self.X)
-        return rf_leafs, is_good
-
-    def get_Xs(self,X ):
-        try:
-            objnum = X.shape[0]
-            Xs = X
-        except:
-
-            Xs = X.copy()
-            X = numpy.hstack(Xs)
-            objnum = X.shape[0]
-
-        csize = 10
-        start = numpy.arange(1 + int(objnum / csize)) * csize
-        end = start + csize
-        fe = numpy.vstack([start, end]).T
-        fe[-1][1] = objnum
-
-        self.fe = fe
-        self.Xs = Xs
-        self.X = X
-
-        return
-
-
-    def get_distance(self,X):
-        self.get_Xs(X)
-        rf_leafs, is_good = self.get_leafs()
-
-        distance_matrix = Parallel(n_jobs=-1)(delayed(build_distance_matrix_slow)
-                                              (rf_leafs, is_good, se)          for se in self.fe)
-        distance_matrix = numpy.vstack(distance_matrix)
-
-        distance_matrix = distance_mat_fill(distance_matrix)
-
-        return distance_matrix
-
-
-    def get_anomaly_score(self,X,mean_over=2500, knn=None):
-        self.get_Xs(X)
-        rf_leafs, is_good = self.get_leafs()
-        
-        nof_objects = X.shape[0]
-    
-        if not knn is None:
-            mean_over = nof_objects
-            knn = int(knn)
-            
-        if  mean_over < nof_objects:
-            distance_to_objects = numpy.random.choice(nof_objects,mean_over,replace=False)
-            
-        else:
-            distance_to_objects = numpy.arange(nof_objects)
-            
-        anomaly_score = Parallel(n_jobs=-1)(delayed(get_anomaly_score_slow)
-                                              (knn, distance_to_objects, rf_leafs, is_good, se)          for se in self.fe)
-
-        anomaly_score = numpy.concatenate(anomaly_score)
-
-
-        return anomaly_score
